@@ -69,6 +69,12 @@ server {
     # HSTS — tells browsers to always use HTTPS. Enable only once HTTPS works.
     add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
 
+    # Keep request headers that contain underscores (e.g. session_id). nginx
+    # drops them by default, which would break sticky-session routing in
+    # multi-account setups / Codex CLI. See the project README "Nginx Reverse
+    # Proxy Note".
+    underscores_in_headers on;
+
     # Upload / request body limit (mirrors the Caddyfile 100MB limit).
     client_max_body_size 100m;
 

@@ -375,6 +375,7 @@ API gateway — a plain nginx snippet would silently break streaming:
 | **Large uploads** | `client_max_body_size 100m` | Matches the app's request-size policy |
 | **WebSocket + keep-alive** | `Upgrade` / `Connection` map | Supports both WS upgrades and keep-alive on one upstream |
 | **Real client IP** | `X-Real-IP`, `X-Forwarded-*`, `CF-Connecting-IP` passthrough | Backend IP priority: `CF-Connecting-IP` → `X-Real-IP` → `X-Forwarded-For` |
+| **Underscore headers** | `underscores_in_headers on` | nginx drops headers with `_` by default (e.g. `session_id`), breaking sticky-session routing in multi-account setups |
 | **HTTP → HTTPS** | `return 301 https://...` | All plaintext traffic is redirected to TLS |
 | **TLS hardening** | TLS 1.2/1.3 + modern ciphers + HSTS | Mirrors the bundled `Caddyfile` policy |
 
