@@ -16,6 +16,9 @@ This directory contains files for deploying Sub2API on Linux servers and Apple-s
 |------|-------------|
 | `docker-compose.yml` | Docker Compose configuration (named volumes) |
 | `docker-compose.local.yml` | Docker Compose configuration (local directories, easy migration) |
+| `docker-compose.nginx.yml` | **Nginx reverse proxy + Let's Encrypt HTTPS overlay** |
+| `nginx/templates/sub2api.conf.template` | Nginx site config template (rendered with your `DOMAIN`) |
+| `nginx/init-letsencrypt.sh` | One-click HTTPS bootstrap (issues the first certificate) |
 | `docker-deploy.sh` | **One-click Docker deployment script (recommended)** |
 | `apple-container.sh` | Native Apple `container` lifecycle script |
 | `APPLE_CONTAINER.md` | Apple `container` deployment and operations guide |
@@ -267,6 +270,132 @@ docker compose -f docker-compose.local.yml up -d
 ```
 
 Your entire deployment (configuration + data) is migrated!
+
+---
+
+## Nginx Reverse Proxy with HTTPS (Docker)
+
+Put Sub2API behind an **nginx** reverse proxy with a custom **domain** and a free,
+auto-renewing **Let's Encrypt** HTTPS certificate. This is an add-on (`overlay`)
+compose file — you layer it on top of your existing Docker deployment.
+
+```text
+Internet ──443/HTTPS──▶ nginx (TLS termination) ──http──▶ sub2api:8080
+                          ▲                                (internal network)
+                          └── certbot (issues + renews the certificate)
+```
+
+### Prerequisites
+
+1. A **domain** (e.g. `api.example.com`) with a DNS **A/AAAA record pointing to this server**.
+2. Ports **80 and 443 open** to the public internet (required for the Let's Encrypt HTTP-01 challenge).
+3. An existing Sub2API Docker deployment (this guide assumes `docker-compose.local.yml`).
+
+### Step 1: Configure the domain
+
+Add your domain and email to `.env` (or pass them inline in Step 2):
+
+```bash
+# In deploy/.env
+DOMAIN=api.example.com
+CERTBOT_EMAIL=you@example.com
+
+# Recommended: once nginx fronts the app, keep the raw app port local-only
+BIND_HOST=127.0.0.1
+```
+
+### Step 2: Bootstrap HTTPS (one command)
+
+The bootstrap script solves the nginx/certbot chicken-and-egg problem (nginx can't
+start without a cert; certbot needs nginx running to prove domain ownership). It
+creates a temporary self-signed cert, starts nginx, then swaps in the real
+Let's Encrypt certificate:
+
+```bash
+cd deploy
+
+# Uses DOMAIN / CERTBOT_EMAIL from .env:
+./nginx/init-letsencrypt.sh
+
+# ...or pass them inline:
+DOMAIN=api.example.com CERTBOT_EMAIL=you@example.com ./nginx/init-letsencrypt.sh
+```
+
+> **💡 Tip:** Test first with `STAGING=1 ./nginx/init-letsencrypt.sh` to avoid
+> Let's Encrypt rate limits. Staging certs are **not trusted by browsers** — once
+> it works, re-run without `STAGING` for a real certificate.
+
+When it finishes, your site is live at `https://api.example.com`.
+
+### Step 3: Normal operation
+
+After the first bootstrap, start/stop the stack by layering both compose files:
+
+```bash
+# Start (app + nginx + certbot)
+docker compose -f docker-compose.local.yml -f docker-compose.nginx.yml up -d
+
+# View nginx logs
+docker compose -f docker-compose.local.yml -f docker-compose.nginx.yml logs -f nginx
+
+# Stop everything
+docker compose -f docker-compose.local.yml -f docker-compose.nginx.yml down
+
+# Verify HTTPS
+curl -I https://api.example.com/health
+```
+
+> Using the named-volume base file instead? Replace `docker-compose.local.yml`
+> with `docker-compose.yml` in the commands above **and** in the bootstrap:
+> `BASE_COMPOSE=docker-compose.yml ./nginx/init-letsencrypt.sh`.
+
+### Certificate Renewal
+
+Renewal is **automatic** — the `certbot` container checks twice a day and renews
+when the certificate is near expiry, and `nginx` reloads every 6 hours to pick up
+the new certificate. No cron job or manual action needed.
+
+To force a renewal / reload manually:
+
+```bash
+docker compose -f docker-compose.local.yml -f docker-compose.nginx.yml run --rm \
+  --entrypoint certbot certbot renew --force-renewal
+docker compose -f docker-compose.local.yml -f docker-compose.nginx.yml exec nginx nginx -s reload
+```
+
+### What's configured for you
+
+The proxy template (`nginx/templates/sub2api.conf.template`) is tuned for an AI
+API gateway — a plain nginx snippet would silently break streaming:
+
+| Concern | Setting | Why |
+|---------|---------|-----|
+| **SSE streaming** | `proxy_buffering off` | LLM responses stream token-by-token; buffering would hold the whole reply until the end |
+| **Long requests** | `proxy_read_timeout 3600s` | Long-running model / streaming calls must not be cut off |
+| **Large uploads** | `client_max_body_size 100m` | Matches the app's request-size policy |
+| **WebSocket + keep-alive** | `Upgrade` / `Connection` map | Supports both WS upgrades and keep-alive on one upstream |
+| **Real client IP** | `X-Real-IP`, `X-Forwarded-*`, `CF-Connecting-IP` passthrough | Backend IP priority: `CF-Connecting-IP` → `X-Real-IP` → `X-Forwarded-For` |
+| **HTTP → HTTPS** | `return 301 https://...` | All plaintext traffic is redirected to TLS |
+| **TLS hardening** | TLS 1.2/1.3 + modern ciphers + HSTS | Mirrors the bundled `Caddyfile` policy |
+
+To customize (rate limits, extra headers, IP allowlists), edit the template and
+restart nginx. Only `${DOMAIN}` is substituted at startup, so nginx's own
+variables (`$host`, `$remote_addr`, …) are safe to use as-is.
+
+### Behind Cloudflare or another edge proxy?
+
+If Cloudflare (or a load balancer) already terminates TLS in front of this server,
+you can either keep this nginx for a second TLS hop (Full/Strict mode) or, if you
+prefer to terminate plain HTTP here, set Cloudflare SSL mode to **Full**. The
+backend already prefers `CF-Connecting-IP` for the real client IP, which nginx
+forwards unchanged.
+
+### Prefer Caddy?
+
+A `Caddyfile` (host-level, auto-HTTPS) is also bundled if you'd rather use
+[Caddy](https://caddyserver.com/) instead of nginx — point it at `localhost:8080`
+and Caddy manages certificates automatically. The nginx overlay above is the
+containerized equivalent.
 
 ---
 

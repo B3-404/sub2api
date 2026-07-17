@@ -1,0 +1,117 @@
+# =============================================================================
+# Sub2API Nginx Reverse Proxy (containerized) — HTTPS with domain support
+# =============================================================================
+# This file is a TEMPLATE. The official nginx image renders it to
+# /etc/nginx/conf.d/sub2api.conf at container startup via envsubst.
+#
+# Only ${DOMAIN} is substituted (docker-compose sets NGINX_ENVSUBST_FILTER=DOMAIN),
+# so nginx runtime variables such as $host / $remote_addr / $scheme are left
+# untouched. Do NOT wrap nginx variables in ${...}.
+#
+# Certificates are issued/renewed by the certbot service (Let's Encrypt).
+# See docker-compose.nginx.yml and nginx/init-letsencrypt.sh.
+# =============================================================================
+
+# Support BOTH SSE keep-alive streaming and WebSocket upgrades on one upstream:
+#   - normal / SSE requests -> Connection ""  (keep-alive to backend)
+#   - WebSocket requests     -> Connection "upgrade"
+map $http_upgrade $connection_upgrade {
+    default upgrade;
+    ''      '';
+}
+
+upstream sub2api_backend {
+    # Reach the app over the internal compose network by service name.
+    server sub2api:8080;
+    keepalive 64;
+}
+
+# -----------------------------------------------------------------------------
+# HTTP :80 — ACME HTTP-01 challenge + redirect everything else to HTTPS
+# -----------------------------------------------------------------------------
+server {
+    listen 80;
+    listen [::]:80;
+    server_name ${DOMAIN};
+
+    # Let's Encrypt HTTP-01 challenge, served from the shared webroot volume.
+    location /.well-known/acme-challenge/ {
+        root /var/www/certbot;
+    }
+
+    # Force HTTPS for all other traffic.
+    location / {
+        return 301 https://$host$request_uri;
+    }
+}
+
+# -----------------------------------------------------------------------------
+# HTTPS :443 — reverse proxy to Sub2API
+# -----------------------------------------------------------------------------
+server {
+    listen 443 ssl;
+    listen [::]:443 ssl;
+    http2 on;
+    server_name ${DOMAIN};
+
+    # --- Certificates (Let's Encrypt) --------------------------------------
+    ssl_certificate     /etc/letsencrypt/live/${DOMAIN}/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/${DOMAIN}/privkey.pem;
+
+    # --- TLS hardening (mirrors deploy/Caddyfile) --------------------------
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_prefer_server_ciphers on;
+    ssl_ciphers ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305:ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256;
+    ssl_session_cache shared:SSL:10m;
+    ssl_session_timeout 1d;
+    ssl_session_tickets off;
+
+    # HSTS — tells browsers to always use HTTPS. Enable only once HTTPS works.
+    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+
+    # Upload / request body limit (mirrors the Caddyfile 100MB limit).
+    client_max_body_size 100m;
+
+    # gzip. NOTE: the backend owns Cache-Control; do not add caching headers here.
+    gzip on;
+    gzip_comp_level 6;
+    gzip_min_length 256;
+    gzip_proxied any;
+    gzip_types text/plain text/css application/json application/javascript application/xml application/rss+xml image/svg+xml;
+
+    # --- Reverse proxy to Sub2API ------------------------------------------
+    location / {
+        proxy_pass http://sub2api_backend;
+        proxy_http_version 1.1;
+
+        # WebSocket upgrade + keep-alive (see the map above).
+        proxy_set_header Upgrade    $http_upgrade;
+        proxy_set_header Connection  $connection_upgrade;
+
+        # Real client info. Backend IP priority: CF-Connecting-IP -> X-Real-IP
+        # -> X-Forwarded-For. CF-Connecting-IP (if present) is forwarded as-is.
+        proxy_set_header Host              $host;
+        proxy_set_header X-Real-IP         $remote_addr;
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Forwarded-Host  $host;
+
+        # --- Streaming (SSE) safety --------------------------------------
+        # LLM responses stream token-by-token. Buffering would hold the whole
+        # response until completion and break the streaming UX.
+        proxy_buffering         off;
+        proxy_request_buffering off;
+        proxy_cache             off;
+
+        # Long-lived LLM / streaming requests must not be cut off.
+        proxy_connect_timeout 60s;
+        proxy_send_timeout    3600s;
+        proxy_read_timeout    3600s;
+    }
+
+    # Health endpoint — proxied, but without cluttering the access log.
+    location = /health {
+        proxy_pass http://sub2api_backend;
+        access_log off;
+    }
+}
