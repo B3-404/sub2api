@@ -79,6 +79,41 @@ func IsImageGenerationIntent(endpoint string, requestedModel string, body []byte
 	return imageIntent
 }
 
+// IsExplicitImageGenerationIntent 仅检测原生 image_generation 工具、图片模型和显式 tool_choice，
+// 不检测被动的 image_gen namespace 声明。用于 capability 路由决策——被动 namespace 不应
+// 强制要求原生 Responses 能力，否则 Chat Completions-only 账号会被误过滤（#4476）。
+func IsExplicitImageGenerationIntent(endpoint string, requestedModel string, body []byte) bool {
+	if IsImageGenerationEndpoint(endpoint) || isOpenAIImageGenerationModel(requestedModel) {
+		return true
+	}
+	if len(body) == 0 || !gjson.ValidBytes(body) {
+		return false
+	}
+	var modelSeen, toolsSeen, toolChoiceSeen bool
+	imageIntent := false
+	parseRawJSONView(body).ForEach(func(key, value gjson.Result) bool {
+		switch key.Str {
+		case "model":
+			if !modelSeen {
+				modelSeen = true
+				imageIntent = isOpenAIImageGenerationModel(strings.TrimSpace(value.String()))
+			}
+		case "tools":
+			if !toolsSeen {
+				toolsSeen = true
+				imageIntent = openAIJSONToolsContainNativeImageGeneration(value)
+			}
+		case "tool_choice":
+			if !toolChoiceSeen {
+				toolChoiceSeen = true
+				imageIntent = openAIJSONToolChoiceSelectsExplicitImageGeneration(value)
+			}
+		}
+		return !imageIntent && (!modelSeen || !toolsSeen || !toolChoiceSeen)
+	})
+	return imageIntent
+}
+
 // IsImageGenerationIntentForPlatform applies platform-specific intent rules.
 //
 // Codex advertises the image_gen namespace on ordinary Responses requests so
@@ -258,8 +293,13 @@ func openAIRequestBodyImageGenerationToolNeedsNormalization(body []byte) bool {
 		if openAIJSONString(item.Get("type")) != "image_generation" {
 			return true
 		}
-		// 只有旧字段需要迁移时才进入 map 修改，纯计费读取保持 raw 路径。
+		// 只有旧字段或明确的模型不兼容字段需要修正时才进入 map 修改。
 		if item.Get("format").Exists() || item.Get("compression").Exists() {
+			needsNormalization = true
+			return false
+		}
+		imageModel := strings.ToLower(strings.TrimSpace(item.Get("model").String()))
+		if strings.HasPrefix(imageModel, "gpt-image-2") && item.Get("input_fidelity").Exists() {
 			needsNormalization = true
 			return false
 		}

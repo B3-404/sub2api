@@ -107,7 +107,7 @@ export interface OpsThroughputTrendResponse {
 
 export type OpsRequestKind = 'success' | 'error'
 export type OpsRequestDetailsKind = OpsRequestKind | 'all'
-export type OpsRequestDetailsSort = 'created_at_desc' | 'duration_desc'
+export type OpsRequestDetailsSort = 'created_at_desc' | 'duration_desc' | 'ttft_desc'
 
 export interface OpsRequestDetail {
   kind: OpsRequestKind
@@ -117,6 +117,7 @@ export interface OpsRequestDetail {
   platform?: string
   model?: string
   duration_ms?: number | null
+  first_token_ms?: number | null
   status_code?: number | null
 
   error_id?: number | null
@@ -814,12 +815,14 @@ export interface OpsAggregationSettings {
 
 export interface OpsRuntimeLogConfig {
   level: 'debug' | 'info' | 'warn' | 'error'
+  persist_access_logs: boolean
   enable_sampling: boolean
   sampling_initial: number
   sampling_thereafter: number
   caller: boolean
   stacktrace_level: 'none' | 'error' | 'fatal'
   retention_days: number
+  request_retention_days: number
   source?: string
   updated_at?: string
   updated_by_user_id?: number
@@ -935,10 +938,6 @@ export interface OpsErrorLog {
   request_type?: number | null
   user_agent?: string
 
-  // 已删除 KEY 所有者(INVALID_API_KEY 归因快照):认证失败行 user_id 为空,
-  // 用户列以此回退显示所有者
-  deleted_key_owner_user_id?: number | null
-  deleted_key_owner_email?: string | null
 }
 
 export interface OpsErrorDetail extends OpsErrorLog {
@@ -957,11 +956,6 @@ export interface OpsErrorDetail extends OpsErrorLog {
   time_to_first_token_ms?: number | null
 
   is_business_limited: boolean
-
-  // Deleted key owner info (INVALID_API_KEY attribution);
-  // owner user_id/email 已上移到 OpsErrorLog(列表用户列回退)
-  attempted_key_prefix?: string | null
-  deleted_key_name?: string | null
 
   // Bound (non-deleted) key prefix, snapshotted at error time
   api_key_prefix?: string | null
